@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs"
 import { createClient } from "@supabase/supabase-js"
 
 function loadEnvLocal() {
-  const content = readFileSync(new URL("../.env.local", import.meta.url), "utf8")
+  const content = readFileSync(new URL("../apps/web/.env.local", import.meta.url), "utf8")
   const env = {}
   for (const line of content.split("\n")) {
     const match = line.match(/^([A-Z_]+)=(.*)$/)

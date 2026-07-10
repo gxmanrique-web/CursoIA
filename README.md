@@ -1,8 +1,13 @@
-# ReadHub
+# ReadHub — Monorepo
 
-Plataforma de publicación de artículos. Next.js 15 (App Router), React 19, TypeScript, TailwindCSS, Shadcn/UI y Supabase.
+Plataforma de publicación de artículos con un sistema RAG (Retrieval-Augmented
+Generation) propio: indexación automática de artículos en pgvector y un
+asistente conversacional (Claude) que responde únicamente con el conocimiento
+publicado en la plataforma.
 
-> Estado: MVP funcional completo — autenticación, listado, publicación, detalle de artículo, comentarios y likes, integrados con Supabase (Auth, Postgres, Storage). Incorpora además un sistema RAG (Retrieval-Augmented Generation): indexación automática de artículos en pgvector y un asistente conversacional (Claude) que responde únicamente con el conocimiento publicado en la plataforma.
+Organizado como monorepo (npm workspaces + Turborepo) para poder compartir el
+pipeline RAG y el acceso a Supabase entre la app web y futuras aplicaciones
+(p. ej. un servidor MCP), sin duplicar lógica.
 
 ## Requisitos
 
@@ -12,16 +17,16 @@ Plataforma de publicación de artículos. Next.js 15 (App Router), React 19, Typ
 
 ## Puesta en marcha
 
-1. Instalar dependencias:
+1. Instalar dependencias (un único lockfile para todo el workspace):
 
    ```bash
    npm install
    ```
 
-2. Copiar las variables de entorno:
+2. Copiar las variables de entorno **dentro de `apps/web`** (Next.js solo autocarga env vars desde la carpeta de la propia app):
 
    ```bash
-   cp .env.example .env.local
+   cp apps/web/.env.example apps/web/.env.local
    ```
 
 3. Levantar Supabase local (aplica migraciones, políticas RLS, buckets de Storage y `seed.sql`):
@@ -30,7 +35,7 @@ Plataforma de publicación de artículos. Next.js 15 (App Router), React 19, Typ
    npm run db:start
    ```
 
-   Al finalizar, `supabase start` imprime `API_URL`, `ANON_KEY` y `SERVICE_ROLE_KEY`. Completa `.env.local` con esos valores (o con los de un proyecto remoto).
+   Al finalizar, `supabase start` imprime `API_URL`, `ANON_KEY` y `SERVICE_ROLE_KEY`. Completa `apps/web/.env.local` con esos valores (o con los de un proyecto remoto).
 
 4. Iniciar el servidor de desarrollo:
 
@@ -38,9 +43,7 @@ Plataforma de publicación de artículos. Next.js 15 (App Router), React 19, Typ
    npm run dev
    ```
 
-   Abrir [http://localhost:3000](http://localhost:3000).
-
-   Usuarios de prueba: ver la tabla en [`supabase/seed.sql`](supabase/seed.sql) (contraseña `Password123!` para todos).
+   Abrir [http://localhost:3000](http://localhost:3000). Usuarios de prueba: ver la tabla en [`supabase/seed.sql`](supabase/seed.sql) (contraseña `Password123!` para todos).
 
 ## Base de datos y Storage local
 
@@ -51,46 +54,54 @@ npm run db:seed-storage   # solo reprovisiona las portadas placeholder (ver nota
 npm run test:rls          # corre la suite pgTAP de supabase/tests contra la base local
 ```
 
+Estos scripts operan sobre `supabase/`, que vive en la **raíz** del monorepo (no dentro de `apps/web`): es infraestructura de base de datos compartida por cualquier app del workspace, no solo la web.
+
 > **Nota sobre las portadas del seed**: `seed.sql` solo puede insertar filas SQL, no subir archivos a Storage. Las rutas de imagen que referencian los artículos de ejemplo (`articles/<id>/cover.jpg`) no existen como objetos reales hasta correr `scripts/seed-storage-placeholders.mjs` (automático dentro de `db:reset`), que sube una imagen placeholder a esas rutas exactas sin modificar `seed.sql` ni ninguna migración.
 
-## Estructura del proyecto
+## Estructura del monorepo
 
 ```
 readhub/
-├── app/
-│   ├── (auth)/              # login, register — layout sin Navbar
-│   ├── (dashboard)/         # home, upload, article/[id], assistant — layout con Navbar, protegido
-│   ├── api/v1/
-│   │   ├── articles/[id]/embedding/  # POST — dispara la indexación (embedding) de un artículo
-│   │   └── chat/                      # POST — único punto de entrada del asistente RAG
-│   └── globals.css          # design tokens (colores, tipografía, radios, sombras)
-├── components/
-│   ├── ui/                  # primitivas Shadcn/UI (button, input, card, dialog, ...)
-│   ├── navigation/          # Navbar, Logo, NavLink
-│   ├── forms/                # FormField, FormActions, FileInput
-│   ├── cards/                # ArticleCard y su skeleton
-│   ├── articles/             # ArticleCover, ArticleMeta, ArticleHeader, LikeButton
-│   ├── comments/             # CommentItem, CommentList, CommentForm
-│   ├── chat/                  # ChatWindow, ChatMessage, ChatInput, ChatSources — interfaz del asistente RAG
-│   ├── dialogs/               # ConfirmDialog
-│   └── states/                # LoadingState, EmptyState, ErrorState
-├── hooks/                    # useAuth, useArticles, useComments, useLikes, useUpload, useArticleDocument, useChat
-├── services/                  # article.service, auth.service, comment.service, storage.service
-│                               # embedding.service, vector-search.service, context-builder.service, chat.service
-│                               # (única capa que llama a Supabase / a los proveedores de IA)
-├── lib/supabase/               # clientes de Supabase (browser, server, middleware, admin)
-├── types/                      # tipos TypeScript (entidades y esquema de BD)
-├── scripts/                     # utilidades de provisioning (seed de Storage)
-├── supabase/
-│   ├── migrations/              # migraciones SQL (incluye buckets de Storage y la infraestructura pgvector)
-│   ├── seed.sql                  # datos de prueba (no modificado)
-│   └── tests/                     # suite pgTAP de validación de políticas RLS
-└── middleware.ts                  # protección de rutas + refresco de sesión
+├── apps/
+│   └── web/                    # App Next.js (ver apps/web/README.md)
+├── packages/
+│   ├── types/                   # Tipos de dominio (Article, Comment, User) + esquema de BD (Database)
+│   ├── database/                 # Cliente admin de Supabase (service-role) + constantes de Storage buckets
+│   ├── ai/                        # Pipeline RAG completo: embedding, vector-search, context-builder, chat
+│   ├── shared/                     # cn/formatDate/formatAuthorLabel + withObservability
+│   └── config/                      # Presets de tsconfig compartidos (nextjs.json, node-library.json)
+├── supabase/                          # Migraciones, RLS, seed, tests pgTAP — infraestructura de BD del workspace
+├── scripts/                            # Utilidades de provisioning (seed de Storage)
+├── package.json                         # Raíz del workspace (npm workspaces)
+├── tsconfig.base.json                    # compilerOptions compartidas
+└── turbo.json                             # Pipeline de tareas (build/dev/lint/check-types)
 ```
+
+### Paquetes compartidos
+
+- **`@readhub/types`**: única fuente de verdad de tipos de dominio y del
+  esquema de base de datos. Sin dependencias de framework.
+- **`@readhub/database`**: cliente Supabase con `SUPABASE_SERVICE_ROLE_KEY`
+  (bypassa RLS) y las constantes de los buckets de Storage. Es lo que
+  cualquier proceso servidor (Route Handler hoy, un futuro servidor MCP
+  mañana) necesita para leer/escribir sin pasar por políticas RLS de
+  usuario. Los clientes atados a Next.js (browser, SSR, middleware) se
+  quedan en `apps/web/lib/supabase/`, no aquí.
+- **`@readhub/ai`**: el pipeline RAG completo (`embedding.service` →
+  `vector-search.service` → `context-builder.service` → `chat.service`),
+  sin dependencias de Next.js — solo Node + `@readhub/database` + los SDKs
+  de OpenAI/Anthropic. Es el código que un servidor MCP invocaría como
+  Tools.
+- **`@readhub/shared`**: utilidades transversales sin acoplamiento de
+  dominio — `cn`/`formatDate`/`formatAuthorLabel` (`@readhub/shared`) y
+  `withObservability` (`@readhub/shared/observability`), usado tanto por
+  los Services de la app web como por el pipeline de `@readhub/ai`.
+- **`@readhub/config`**: presets de `tsconfig` para no repetir
+  `compilerOptions` en cada app/paquete nuevo.
 
 ### Sistema RAG
 
-Pipeline de indexación y recuperación, en capas aisladas (cada Service solo conoce al siguiente, sin lógica duplicada):
+Pipeline de indexación y recuperación (implementado en `packages/ai`), en capas aisladas — cada Service solo conoce al siguiente, sin lógica duplicada:
 
 ```
 articles (Postgres) ──▶ embedding.service ──▶ article_embeddings (pgvector, HNSW)
@@ -104,28 +115,23 @@ consulta del usuario ──▶ vector-search.service ◀──────┘
                         chat.service (Claude) ──▶ respuesta + fuentes citadas
 ```
 
-- **`embedding.service.ts`**: genera embeddings (OpenAI `text-embedding-3-small`, 1536 dims) a partir de título + resumen + contenido (`.txt`; PDF/DOCX aún no tienen extractor, ver "Limitaciones conocidas").
+- **`embedding.service.ts`**: genera embeddings (OpenAI `text-embedding-3-small`, 1536 dims) a partir de título + resumen + contenido (`.txt`; PDF/DOCX aún no tienen extractor, ver "Limitaciones conocidas" en `apps/web/README.md`).
 - **`vector-search.service.ts`**: recuperación semántica vía la función SQL `match_article_embeddings` (`extensions.vector`, índice HNSW, similitud coseno).
 - **`context-builder.service.ts`**: selecciona, deduplica y limita los documentos recuperados, y arma el prompt final — no llama a ningún proveedor de IA.
 - **`chat.service.ts`**: único punto de contacto con Claude (`@anthropic-ai/sdk`); orquesta los tres servicios anteriores sin duplicar su lógica.
-- La indexación se dispara automáticamente al crear/actualizar un artículo (`article.service.ts` → `POST /api/v1/articles/[id]/embedding`, fire-and-forget) y se elimina automáticamente al borrar el artículo (`ON DELETE CASCADE` en `article_embeddings`).
-- Todos estos Services corren **exclusivamente en el servidor** (requieren `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY` y `ANTHROPIC_API_KEY`) y se exponen a la UI únicamente a través de `app/api/v1/**`, nunca importados directamente desde componentes cliente.
+- La indexación se dispara automáticamente al crear/actualizar un artículo (`apps/web/services/article.service.ts` → `POST /api/v1/articles/[id]/embedding`, fire-and-forget) y se elimina automáticamente al borrar el artículo (`ON DELETE CASCADE` en `article_embeddings`).
+- Todo el pipeline corre **exclusivamente en el servidor** (requiere `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY` y `ANTHROPIC_API_KEY`) y se expone a la UI únicamente a través de `apps/web/app/api/v1/**`, nunca importado directamente desde componentes cliente.
 
 ## Variables de entorno
 
-Ver [`.env.example`](.env.example):
+Ver [`apps/web/.env.example`](apps/web/.env.example):
 
 - `NEXT_PUBLIC_SUPABASE_URL`: URL del proyecto Supabase.
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: clave pública (anon) para el cliente de navegador y servidor.
-- `SUPABASE_SERVICE_ROLE_KEY`: clave con privilegios elevados. Usada por scripts de administración/seed y por `lib/supabase/admin.ts` (Services del RAG que corren en servidor). Nunca exponer al cliente.
-- `OPENAI_API_KEY`: proveedor de embeddings (`embedding.service.ts`, `text-embedding-3-small`).
-- `ANTHROPIC_API_KEY`: proveedor conversacional (`chat.service.ts`, Claude).
+- `SUPABASE_SERVICE_ROLE_KEY`: clave con privilegios elevados. Usada por scripts de administración/seed y por `@readhub/database` (Services del RAG que corren en servidor). Nunca exponer al cliente.
+- `OPENAI_API_KEY`: proveedor de embeddings (`@readhub/ai`, `text-embedding-3-small`).
+- `ANTHROPIC_API_KEY`: proveedor conversacional (`@readhub/ai`, Claude).
 
 ## Limitaciones conocidas
 
-- **Conteos de likes/vistas**: las políticas RLS heredadas (`likes_select_own`, `views_select_admin_or_author`) solo permiten ver las filas propias, así que el conteo mostrado en artículos ajenos no refleja el total real. Corregirlo requiere una función `security definer` (RPC) o ampliar esas políticas — pendiente de decisión.
-- **Nombre de autor/comentarista**: `profiles` no tiene columna de nombre/email pública y su RLS impide leer el perfil de otro usuario; se muestra un identificador corto derivado del `user_id`.
-- **API REST versionada** (`/api/v1/...`): parcialmente implementada — solo existen los dos Route Handlers que requiere el sistema RAG (`articles/[id]/embedding`, `chat`), necesarios porque esos Services corren en servidor con secretos que no pueden llegar al navegador. El resto de la aplicación (artículos, comentarios, likes, auth) sigue interactuando con Supabase directamente desde la capa `services/` consumida por Custom Hooks, sin Route Handlers.
-- **Extracción de texto de documentos**: el RAG solo vectoriza el contenido completo de documentos `.txt`. Para PDF/DOCX, el embedding se genera únicamente con título + resumen (no hay extractor de texto implementado); esto degrada la calidad de la búsqueda semántica para esos artículos.
-- **Streaming del asistente**: la respuesta de Claude no se transmite en streaming real desde el backend (`chat.service.ts` espera la respuesta completa); la interfaz simula el renderizado progresivo revelando el texto ya recibido en el cliente.
-- **Autorización de los endpoints del RAG**: `POST /api/v1/articles/[id]/embedding` y `POST /api/v1/chat` solo exigen una sesión válida, no verifican que el usuario sea el autor del artículo indexado. Riesgo bajo (costo de API por regeneración redundante, sin fuga de datos) — candidato a endurecer si el proyecto avanza más allá del laboratorio.
+Ver [`apps/web/README.md`](apps/web/README.md#limitaciones-conocidas) — no se modificaron en esta migración (reorganización puramente estructural, sin cambios de comportamiento).
