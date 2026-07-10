@@ -2,11 +2,7 @@
   "extends": "@readhub/config/typescript/node-library.json",
   "compilerOptions": {
     "rootDir": "./src",
-    "outDir": "./dist",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "types": ["node"],
-    "noEmit": false
+    "types": ["node"]
   },
   "include": ["src"]
 }
