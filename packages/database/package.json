@@ -9,6 +9,7 @@
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
+    "@readhub/shared": "*",
     "@readhub/types": "*",
     "@supabase/supabase-js": "^2.110.0"
   },

@@ -8,9 +8,12 @@
  *
  * - `@readhub/ai`: pipeline RAG completo (búsqueda semántica + asistente
  *   conversacional + indexación) — es el candidato más directo a Tools MCP.
- * - `@readhub/database`: cliente admin de Supabase (bypassa RLS) y
- *   constantes de Storage — necesario para cualquier Tool/Resource que
- *   lea artículos o documentos.
+ * - `@readhub/database`: cliente admin de Supabase (bypassa RLS), constantes
+ *   de Storage, y `getArticles`/`getArticleById`/`searchArticlesByKeyword`
+ *   (equivalentes server-side de las consultas de lectura de
+ *   `apps/web/services/article.service.ts` — ver justificación en
+ *   `packages/database/src/articles.ts` de por qué no se reutiliza ese
+ *   archivo tal cual).
  * - `@readhub/types`: tipos de dominio y de esquema de BD, para tipar los
  *   argumentos/resultados de las futuras Tools sin redefinirlos.
  *
@@ -20,8 +23,17 @@
  * relevante, y ya viaja implícito dentro de los Services de `@readhub/ai`.
  */
 
-export { searchArticles, askAssistant, generateArticleEmbedding } from "@readhub/ai"
+export { searchArticles as searchArticlesSemantic, askAssistant, generateArticleEmbedding } from "@readhub/ai"
 
-export { createAdminClient, ARTICLE_DOCUMENTS_BUCKET, ARTICLE_COVERS_BUCKET } from "@readhub/database"
+export {
+  createAdminClient,
+  ARTICLE_DOCUMENTS_BUCKET,
+  ARTICLE_COVERS_BUCKET,
+  getArticles,
+  getArticleById,
+  searchArticlesByKeyword,
+} from "@readhub/database"
+
+export type { ArticleWithStats } from "@readhub/database"
 
 export type { Article, Comment, Profile, Database } from "@readhub/types"
