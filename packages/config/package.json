@@ -2,5 +2,11 @@
   "name": "@readhub/config",
   "version": "0.0.0",
   "private": true,
-  "files": ["typescript"]
+  "type": "module",
+  "files": ["typescript", "vitest"],
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite-tsconfig-paths": "^5.1.4"
+  }
 }
