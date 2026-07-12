@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # TypeScript, ESLint y Vitest no necesitan la app corriendo ni Supabase:
+  # los services/hooks se prueban con mocks (Prompt 3), así que este job no
+  # requiere ninguna credencial.
+  validate:
+    name: Type-check, lint & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Cache del build cache local de Turborepo (packages/apps exportan TS
+      # fuente sin paso de build propio, pero check-types/lint sí dependen de
+      # ^build para los packages que consumen); acelera runs repetidos sobre
+      # el mismo commit/rama sin depender de un remote cache de Turbo.
+      - name: Cache Turborepo
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript
+        run: npm run check-types
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run Vitest
+        run: npm run test:coverage
+
+      - name: Upload unit test artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-report
+          path: |
+            apps/web/coverage
+            packages/ai/coverage
+            packages/shared/coverage
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Job separado: Playwright necesita la app construida y corriendo, más una
+  # instancia real de Supabase (local, vía Docker) para autenticar contra el
+  # flujo real (Prompt 5). No se usa ningún proyecto remoto ni secreto del
+  # repositorio: `supabase start` levanta un stack local con las claves de
+  # demo fijas del propio CLI (públicas, sin valor fuera de localhost).
+  e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Start local Supabase (aplica migraciones + seed automáticamente)
+        run: supabase start
+
+      # apps/web/.env.local no se versiona (ver .gitignore); se genera aquí
+      # a partir de las claves locales que devuelve el propio CLI, nunca de
+      # un secret del repositorio.
+      - name: Configure app environment against local Supabase
+        run: |
+          supabase status -o env | sed -n \
+            's/^API_URL="\(.*\)"/NEXT_PUBLIC_SUPABASE_URL=\1/p;
+             s/^ANON_KEY="\(.*\)"/NEXT_PUBLIC_SUPABASE_ANON_KEY=\1/p;
+             s/^SERVICE_ROLE_KEY="\(.*\)"/SUPABASE_SERVICE_ROLE_KEY=\1/p' \
+            > apps/web/.env.local
+
+      - name: Run Playwright E2E
+        env:
+          CI: true
+        run: npm run test:e2e
+
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop
+
+      - name: Upload Playwright report (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 7
+          if-no-files-found: ignore
