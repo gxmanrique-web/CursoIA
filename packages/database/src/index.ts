@@ -1,3 +1,5 @@
 export * from "./admin"
 export * from "./storage-buckets"
 export * from "./articles"
+export * from "./authors"
+export * from "./stats"

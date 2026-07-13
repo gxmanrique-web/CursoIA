@@ -2,13 +2,7 @@ import { z } from "zod"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
 import { askAssistant } from "../readhub.js"
-
-const sourceShape = z.object({
-  rank: z.number(),
-  articleId: z.string(),
-  title: z.string(),
-  similarity: z.number(),
-})
+import { sourceShape } from "./shared/rag-shapes.js"
 
 /**
  * Responde una consulta usando el pipeline RAG completo de ReadHub.

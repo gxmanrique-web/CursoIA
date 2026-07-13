@@ -2,15 +2,7 @@ import { z } from "zod"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
 import { searchArticlesSemantic } from "../readhub.js"
-
-const semanticResultShape = z.object({
-  rank: z.number(),
-  articleId: z.string(),
-  title: z.string(),
-  summary: z.string().nullable(),
-  documentPath: z.string(),
-  similarity: z.number(),
-})
+import { semanticResultShape } from "./shared/rag-shapes.js"
 
 /**
  * Búsqueda semántica (por significado, vía embeddings + pgvector) sobre
