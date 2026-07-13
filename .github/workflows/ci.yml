@@ -9,7 +9,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "20"
+  # packages/shared/vitest.config.ts reexporta @readhub/config/vitest/base
+  # (.ts sin paso de build): Vite externaliza ese import de paquete al
+  # empaquetar el config, y Node termina cargando el .ts con su loader
+  # nativo — soportado recién desde Node 22.6+ (23.6+ sin flag). Node 20
+  # no lo soporta y falla con ERR_UNKNOWN_FILE_EXTENSION.
+  NODE_VERSION: "22"
 
 jobs:
   # TypeScript, ESLint y Vitest no necesitan la app corriendo ni Supabase:
