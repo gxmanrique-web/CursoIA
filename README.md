@@ -132,6 +132,23 @@ Ver [`apps/web/.env.example`](apps/web/.env.example):
 - `OPENAI_API_KEY`: proveedor de embeddings (`@readhub/ai`, `text-embedding-3-small`).
 - `ANTHROPIC_API_KEY`: proveedor conversacional (`@readhub/ai`, Claude).
 
+## CI/CD
+
+`.github/workflows/ci.yml` corre en cada `push` y `pull_request`, en dos jobs:
+
+- **`validate`**: `check-types`, `lint`, `test:coverage` (Vitest). No requiere ninguna credencial — los Services se prueban con mocks.
+- **`e2e`** (depende de `validate`): construye la app y corre Playwright (`apps/web/e2e/auth.spec.ts`) contra el proyecto Supabase remoto real, autenticando con los usuarios sembrados en `apps/web/e2e/data/users.ts`.
+
+El job `e2e` necesita estos **GitHub Secrets** (Settings → Secrets and variables → Actions), con los mismos valores que `apps/web/.env.local`:
+
+| Secret | Uso |
+|---|---|
+| `SUPABASE_URL` | `NEXT_PUBLIC_SUPABASE_URL` |
+| `SUPABASE_ANON_KEY` | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+| `SUPABASE_SERVICE_ROLE_KEY` | `SUPABASE_SERVICE_ROLE_KEY` (bypassa RLS — tratar como credencial de producción) |
+
+Cargarlos vía `gh secret set <NOMBRE> --body "<valor>"` o desde la UI de GitHub. Sin estos 3 secrets el job `e2e` falla al construir la app (faltan las `NEXT_PUBLIC_*` en build time).
+
 ## Limitaciones conocidas
 
 Ver [`apps/web/README.md`](apps/web/README.md#limitaciones-conocidas) — no se modificaron en esta migración (reorganización puramente estructural, sin cambios de comportamiento).

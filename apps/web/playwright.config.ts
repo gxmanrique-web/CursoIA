@@ -26,11 +26,19 @@ export default defineConfig({
   reporter: isCI
     ? [["list"], ["html", { open: "never" }], ["junit", { outputFile: "test-results/junit.xml" }]]
     : [["html", { open: "never" }]],
+  // El backend de auth es un proyecto Supabase remoto (no localhost): las
+  // aserciones que dependen de una respuesta de red real (p. ej. la
+  // redirección tras login) necesitan más margen que el default de 5s.
+  expect: {
+    timeout: 15_000,
+  },
   use: {
     baseURL,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    actionTimeout: 15_000,
+    navigationTimeout: 15_000,
   },
   projects: [
     {

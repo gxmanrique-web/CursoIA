@@ -64,11 +64,12 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Job separado: Playwright necesita la app construida y corriendo, más una
-  # instancia real de Supabase (local, vía Docker) para autenticar contra el
-  # flujo real (Prompt 5). No se usa ningún proyecto remoto ni secreto del
-  # repositorio: `supabase start` levanta un stack local con las claves de
-  # demo fijas del propio CLI (públicas, sin valor fuera de localhost).
+  # Job separado: Playwright necesita la app construida y corriendo, más un
+  # backend de auth real (Prompt 5). Usa el proyecto Supabase remoto del
+  # equipo (no una instancia local efímera): las credenciales viajan como
+  # GitHub Secrets, nunca committeadas ni impresas en logs. Los 3 usuarios
+  # de prueba (ana@/marta@/admin@readhub.test, contraseña Password123!)
+  # deben existir de antemano en ese proyecto (ver apps/web/e2e/data/users.ts).
   e2e:
     name: Playwright E2E
     runs-on: ubuntu-latest
@@ -86,11 +87,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -101,28 +97,25 @@ jobs:
         working-directory: apps/web
         run: npx playwright install --with-deps chromium
 
-      - name: Start local Supabase (aplica migraciones + seed automáticamente)
-        run: supabase start
-
       # apps/web/.env.local no se versiona (ver .gitignore); se genera aquí
-      # a partir de las claves locales que devuelve el propio CLI, nunca de
-      # un secret del repositorio.
-      - name: Configure app environment against local Supabase
+      # a partir de GitHub Secrets del repositorio, nunca hardcodeado.
+      - name: Configure app environment against remote Supabase
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          supabase status -o env | sed -n \
-            's/^API_URL="\(.*\)"/NEXT_PUBLIC_SUPABASE_URL=\1/p;
-             s/^ANON_KEY="\(.*\)"/NEXT_PUBLIC_SUPABASE_ANON_KEY=\1/p;
-             s/^SERVICE_ROLE_KEY="\(.*\)"/SUPABASE_SERVICE_ROLE_KEY=\1/p' \
-            > apps/web/.env.local
+          cat <<EOF > .env.local
+          NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+          NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+          SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY
+          EOF
 
       - name: Run Playwright E2E
         env:
           CI: true
         run: npm run test:e2e
-
-      - name: Stop local Supabase
-        if: always()
-        run: supabase stop
 
       - name: Upload Playwright report (on failure)
         if: failure()
