@@ -1,3 +1,4 @@
+import { memo } from "react"
 import { Bot, User } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -9,7 +10,7 @@ interface ChatMessageProps {
   message: ChatMessageType
 }
 
-function ChatMessage({ message }: ChatMessageProps) {
+function ChatMessageComponent({ message }: ChatMessageProps) {
   const isUser = message.role === "user"
 
   return (
@@ -43,5 +44,7 @@ function ChatMessage({ message }: ChatMessageProps) {
     </div>
   )
 }
+
+const ChatMessage = memo(ChatMessageComponent)
 
 export { ChatMessage }

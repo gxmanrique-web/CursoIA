@@ -34,6 +34,18 @@ export function registerInfoResource(server: McpServer): void {
           "search_articles",
           "search_articles_semantic",
           "ask_assistant",
+          "compare_articles",
+          "extract_main_themes",
+          "generate_global_summary",
+          "find_related_articles",
+          "build_research_context",
+        ],
+        prompts: [
+          "summarize_article",
+          "explain_article",
+          "compare_articles",
+          "generate_questions",
+          "extract_key_concepts",
         ],
       }
 

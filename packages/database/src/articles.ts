@@ -25,6 +25,12 @@ type ArticleRowWithCounts = Article & {
  * versión web, esta SÍ devuelve conteos reales de likes/vistas: el cliente
  * admin bypassa las políticas RLS (`likes_select_own`,
  * `views_select_admin_or_author`) que limitan esos conteos en la app web.
+ *
+ * Por el mismo motivo, `_getArticleById` SÍ necesita filtrar `is_public`
+ * explícitamente (a diferencia de la versión web, donde `articles_select_own`
+ * deja ver artículos privados propios vía sesión): el cliente admin no tiene
+ * noción de "propio autor", así que sin este filtro cualquier id de artículo
+ * privado sería legible por igual — el servidor MCP no distingue autores.
  */
 function withStats(row: ArticleRowWithCounts): ArticleWithStats {
   const { likes, views, ...article } = row
@@ -53,6 +59,7 @@ async function _getArticleById(id: string): Promise<ArticleWithStats | null> {
     .from("articles")
     .select("*, likes(count), views(count)")
     .eq("id", id)
+    .eq("is_public", true)
     .maybeSingle()
 
   if (error) throw error

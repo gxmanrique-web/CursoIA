@@ -17,8 +17,8 @@ export interface ChatMessage {
   isStreaming?: boolean
 }
 
-const REVEAL_INTERVAL_MS = 12
-const REVEAL_CHUNK_SIZE = 3
+const REVEAL_INTERVAL_MS = 40
+const REVEAL_CHUNK_SIZE = 10
 
 /**
  * Historial de conversación en memoria, vive mientras dure la sesión del

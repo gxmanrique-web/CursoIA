@@ -1,21 +1,40 @@
 # Secrets y variables de GitHub Actions
 
-## Estado actual: no se requiere configurar ningún secret
+## Estado actual: `deploy` (y `e2e`, según el proyecto Supabase objetivo) requieren secrets
 
-El workflow ([workflows/ci.yml](workflows/ci.yml)) está diseñado deliberadamente para no
-depender de ningún secret del repositorio:
+El workflow ([workflows/ci.yml](workflows/ci.yml)) tiene cuatro jobs: `validate`, `e2e`,
+`performance` y `deploy`.
 
 - **Job `validate`** (TypeScript, ESLint, Vitest): los services/hooks se prueban con mocks
   (ver `apps/web/services/*.test.ts`, `packages/ai/src/*.test.ts`) — nunca se llama a
   Supabase, OpenAI ni Anthropic reales, así que no hace falta ninguna credencial.
-- **Job `e2e`** (Playwright): levanta un Supabase **local** con `supabase start` dentro del
-  propio runner y genera `apps/web/.env.local` a partir de `supabase status -o env`. Esas
-  claves son las claves de demo fijas que trae el CLI de Supabase (`ANON_KEY`/`SERVICE_ROLE_KEY`
-  con `iss: "supabase-demo"`) — públicas, documentadas por el propio proyecto Supabase, sin
-  ningún valor fuera de `127.0.0.1`. No es necesario ni deseable guardarlas como secret.
+- **Job `e2e`** (Playwright): autentica contra un proyecto Supabase remoto real usando
+  `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` como Repository Secrets
+  (ver tabla abajo).
+- **Job `performance`** (build + presupuesto de bundle + Lighthouse): no requiere ningún
+  secret — solo audita `/login` y `/register`, rutas 100% estáticas que no dependen de
+  Supabase en build time.
+- **Job `deploy`** (Vercel, solo en `push` a `main`): requiere `VERCEL_TOKEN`,
+  `VERCEL_ORG_ID` y `VERCEL_PROJECT_ID` como Repository Secrets.
 
-**Por lo tanto: en Settings → Secrets and variables → Actions no hay que crear nada para que
-`ci.yml` funcione tal como está.**
+## Secrets requeridos
+
+| Secret | Job | Uso |
+|---|---|---|
+| `SUPABASE_URL` | `e2e` | `NEXT_PUBLIC_SUPABASE_URL` |
+| `SUPABASE_ANON_KEY` | `e2e` | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+| `SUPABASE_SERVICE_ROLE_KEY` | `e2e` | Bypassa RLS — tratar como credencial de producción |
+| `VERCEL_TOKEN` | `deploy` | Autenticación del CLI de Vercel (`vercel pull` / `build` / `deploy`) |
+| `VERCEL_ORG_ID` | `deploy` | ID de la organización/cuenta de Vercel |
+| `VERCEL_PROJECT_ID` | `deploy` | ID del proyecto de Vercel enlazado a `apps/web` |
+
+Los tres de Vercel se obtienen corriendo `vercel link` una vez en local desde `apps/web`
+(genera `.vercel/project.json`, gitignoreado, con `orgId`/`projectId`) o desde
+Project Settings → General en el dashboard de Vercel. Cargar todos vía
+`gh secret set <NOMBRE> --body "<valor>"` o desde Settings → Secrets and variables → Actions.
+
+Sin los 3 secrets de Supabase, `e2e` falla al construir la app (faltan las `NEXT_PUBLIC_*`
+en build time). Sin los 3 de Vercel, `deploy` falla en el primer paso (`vercel pull`).
 
 ## Secrets que SÍ habría que agregar si el pipeline se extiende
 

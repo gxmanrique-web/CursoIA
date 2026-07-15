@@ -48,6 +48,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# lighthouse CI (Prompt 3: reportes locales, se suben como artifact en CI)
+.lighthouseci/
+lighthouse-report*.json
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

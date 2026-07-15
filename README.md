@@ -134,20 +134,47 @@ Ver [`apps/web/.env.example`](apps/web/.env.example):
 
 ## CI/CD
 
-`.github/workflows/ci.yml` corre en cada `push` y `pull_request`, en dos jobs:
+`.github/workflows/ci.yml` corre en cada `push` y `pull_request`, en cuatro jobs encadenados:
+
+```
+validate ──┐
+           ├──▶ performance ──▶ deploy (solo push a main)
+e2e ───────┘
+```
 
 - **`validate`**: `check-types`, `lint`, `test:coverage` (Vitest). No requiere ninguna credencial — los Services se prueban con mocks.
 - **`e2e`** (depende de `validate`): construye la app y corre Playwright (`apps/web/e2e/auth.spec.ts`) contra el proyecto Supabase remoto real, autenticando con los usuarios sembrados en `apps/web/e2e/data/users.ts`.
+- **`performance`** (depende de `validate` + `e2e`): genera el build de producción de `apps/web`, valida el tamaño del bundle contra un presupuesto (`scripts/check-bundle-budget.mjs`) y corre Lighthouse (`apps/web/lighthouserc.js`) contra `/login` y `/register` — las dos únicas rutas 100% estáticas, sin depender de sesión ni de Supabase. Si el bundle excede el presupuesto o Lighthouse incumple los umbrales de performance/LCP/CLS/TBT, el job falla y bloquea el despliegue. Sube el log de build y los reportes de Lighthouse como artifact `performance-report` en cada corrida.
+- **`deploy`** (depende de `validate` + `e2e` + `performance`, solo si `github.ref == 'refs/heads/main'` en un `push`): despliega a Vercel en producción con el CLI oficial (`vercel pull` → `vercel build --prod` → `vercel deploy --prebuilt --prod`). No se dispara en Pull Requests.
 
-El job `e2e` necesita estos **GitHub Secrets** (Settings → Secrets and variables → Actions), con los mismos valores que `apps/web/.env.local`:
+Los jobs `e2e` y `deploy` necesitan **GitHub Secrets** (Settings → Secrets and variables → Actions):
 
 | Secret | Uso |
 |---|---|
-| `SUPABASE_URL` | `NEXT_PUBLIC_SUPABASE_URL` |
-| `SUPABASE_ANON_KEY` | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
-| `SUPABASE_SERVICE_ROLE_KEY` | `SUPABASE_SERVICE_ROLE_KEY` (bypassa RLS — tratar como credencial de producción) |
+| `SUPABASE_URL` | `NEXT_PUBLIC_SUPABASE_URL` (job `e2e`) |
+| `SUPABASE_ANON_KEY` | `NEXT_PUBLIC_SUPABASE_ANON_KEY` (job `e2e`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | `SUPABASE_SERVICE_ROLE_KEY`, bypassa RLS — tratar como credencial de producción (job `e2e`) |
+| `VERCEL_TOKEN` | Autenticación del CLI de Vercel (job `deploy`) |
+| `VERCEL_ORG_ID` | ID de la organización/cuenta de Vercel (job `deploy`) |
+| `VERCEL_PROJECT_ID` | ID del proyecto de Vercel enlazado a `apps/web` (job `deploy`) |
 
-Cargarlos vía `gh secret set <NOMBRE> --body "<valor>"` o desde la UI de GitHub. Sin estos 3 secrets el job `e2e` falla al construir la app (faltan las `NEXT_PUBLIC_*` en build time).
+Cargarlos vía `gh secret set <NOMBRE> --body "<valor>"` o desde la UI de GitHub. Sin los 3 secrets de Supabase el job `e2e` falla al construir la app; sin los 3 de Vercel, el job `deploy` falla al hacer `vercel pull`. Los IDs de Vercel se obtienen corriendo `vercel link` una vez en local (genera `.vercel/project.json` con ambos valores) o desde Project Settings en el dashboard de Vercel.
+
+## Rendimiento
+
+Optimizaciones aplicadas sobre el proyecto base (sin tocar lógica de negocio, flujo RAG, APIs ni arquitectura):
+
+- **Imágenes**: las portadas de artículo (`apps/web/components/articles/article-cover.tsx`) usan `next/image` en vez de `<img>` nativo, con `images.remotePatterns` en `next.config.ts` apuntando a `*.supabase.co` (Supabase Storage). Reduce el peso descargado (resize automático + formatos modernos) y mejora LCP en `/article/[id]`.
+- **Chat del asistente**: `useChat.ts` revela la respuesta progresivamente cada 40 ms (antes 12 ms) manteniendo la misma velocidad percibida, y `ChatMessage` está memoizado con `React.memo` — reduce ~3x los re-renders durante una respuesta del asistente, mejorando INP.
+- **Tree shaking**: `packages/shared` y `packages/ai` declaran `"sideEffects": false`, permitiendo que Next elimine código no usado de forma más agresiva al consumirlos vía `transpilePackages`.
+- **Dependencias**: `shadcn` (CLI de scaffolding, no runtime) se movió de `dependencies` a `devDependencies` en `apps/web/package.json`.
+
+Buenas prácticas para mantener el rendimiento del proyecto:
+
+- Cualquier imagen nueva de contenido dinámico debe pasar por `next/image` (nunca `<img>` crudo); si el dominio no está en `images.remotePatterns`, agregarlo ahí en vez de deshabilitar la optimización.
+- Antes de mergear, revisar el artifact `performance-report` del job `performance`: si el bundle o Lighthouse están cerca del presupuesto, es preferible resolverlo ahí que subir el umbral en `scripts/check-bundle-budget.mjs` / `apps/web/lighthouserc.js`.
+- Estados que se actualizan muy seguido (temporizadores, streaming simulado, animaciones) deben memoizar los componentes hijos afectados (`React.memo`) para no re-renderizar listas completas por un cambio parcial.
+- Nuevos paquetes en `packages/*` deben declarar `"sideEffects": false` si son módulos puros sin efectos de import.
 
 ## Limitaciones conocidas
 

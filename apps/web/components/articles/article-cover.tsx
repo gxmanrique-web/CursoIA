@@ -1,3 +1,4 @@
+import Image from "next/image"
 import { ImageOff } from "lucide-react"
 
 import { cn } from "@readhub/shared"
@@ -23,10 +24,19 @@ function ArticleCover({ src, alt, className, loading = "lazy" }: ArticleCoverPro
     )
   }
 
+  const isPriority = loading === "eager"
+
   return (
-    <div className={cn("aspect-video w-full overflow-hidden bg-muted", className)}>
-      {/* eslint-disable-next-line @next/next/no-img-element -- fuente dinámica (Supabase Storage), sin dominios fijos que declarar en next.config */}
-      <img src={src} alt={alt} loading={loading} className="size-full object-cover" />
+    <div className={cn("relative aspect-video w-full overflow-hidden bg-muted", className)}>
+      <Image
+        src={src}
+        alt={alt}
+        fill
+        priority={isPriority}
+        {...(!isPriority && { loading: "lazy" })}
+        sizes="(min-width: 1024px) 640px, 100vw"
+        className="object-cover"
+      />
     </div>
   )
 }

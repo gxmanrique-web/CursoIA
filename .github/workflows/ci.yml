@@ -132,3 +132,115 @@ jobs:
             apps/web/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  # Se ejecuta solo si type-check/lint/Vitest (validate) y Playwright (e2e) ya
+  # pasaron: no tiene sentido invertir minutos de build + Lighthouse en un
+  # cambio que ya falló una validación funcional más barata. Construye la
+  # versión de producción, mide el tamaño del bundle contra un presupuesto y
+  # corre Lighthouse contra las páginas públicas para bloquear el despliegue
+  # si el rendimiento no cumple el umbral.
+  performance:
+    name: Build, bundle budget & Lighthouse
+    runs-on: ubuntu-latest
+    needs: [validate, e2e]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `next build` no necesita credenciales de Supabase/IA: solo se auditan
+      # rutas públicas prerenderizadas (/login, /register, ver lighthouserc.js)
+      # y el bundle no depende de datos en tiempo de build.
+      - name: Production build (apps/web)
+        working-directory: apps/web
+        run: npm run build | tee build.log
+
+      # Falla el job (y por lo tanto bloquea el job `deploy`) si alguna ruta o
+      # el JS compartido supera el presupuesto. Umbrales configurables vía
+      # BUNDLE_ROUTE_BUDGET_KB / BUNDLE_SHARED_BUDGET_KB si el proyecto crece
+      # de forma deliberada.
+      - name: Check bundle size budget
+        run: npm run check-bundle-budget
+
+      # lighthouserc.js levanta `next start` en un puerto local y audita
+      # /login y /register (únicas rutas 100% estáticas, sin sesión real).
+      # Las aserciones de performance/LCP/CLS/TBT están en ese archivo; si
+      # alguna falla, `lhci autorun` sale con código distinto de 0 y el job
+      # (y el despliegue) se bloquean.
+      - name: Lighthouse CI (Core Web Vitals)
+        working-directory: apps/web
+        run: npm run test:performance
+
+      # Reporte de rendimiento como artefacto del pipeline: log de build (con
+      # la tabla de tamaños por ruta) + reportes HTML/JSON de Lighthouse.
+      # Se sube siempre (no solo en fallo), ya que es un entregable de cada
+      # corrida, no solo un diagnóstico de errores.
+      - name: Upload performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report
+          path: |
+            apps/web/build.log
+            apps/web/.lighthouseci
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # Solo despliega desde main y solo si validate + e2e + performance pasaron.
+  # No se dispara en Pull Requests: evita gastar despliegues de producción de
+  # Vercel en ramas que todavía no se mergearon.
+  deploy:
+    name: Deploy to Vercel (production)
+    runs-on: ubuntu-latest
+    needs: [validate, e2e, performance]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # CLI oficial de Vercel en vez de una Action de terceros: mismo enfoque
+      # de "solo actions/tooling oficial" que ya usa el resto de este workflow.
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # `vercel pull` trae la configuración del proyecto (Root Directory,
+      # variables de entorno de Production) usando el token y los IDs del
+      # proyecto — no hace falta duplicar esa configuración en el workflow.
+      - name: Pull Vercel project settings
+        working-directory: apps/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build for Vercel (production)
+        working-directory: apps/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy prebuilt output to Vercel
+        working-directory: apps/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"

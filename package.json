@@ -18,7 +18,8 @@
     "db:start": "supabase start",
     "db:reset": "supabase db reset && npm run db:seed-storage",
     "db:seed-storage": "node scripts/seed-storage-placeholders.mjs",
-    "test:rls": "supabase test db supabase/tests --local"
+    "test:rls": "supabase test db supabase/tests --local",
+    "check-bundle-budget": "node scripts/check-bundle-budget.mjs apps/web/build.log"
   },
   "devDependencies": {
     "turbo": "^2.5.0",

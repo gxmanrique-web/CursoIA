@@ -12,6 +12,17 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.join(__dirname, "..", ".."),
   },
+  // Portadas de artículo se sirven desde Supabase Storage, cuyo host siempre
+  // es *.supabase.co independientemente del proyecto (local/staging/prod).
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "*.supabase.co",
+        pathname: "/storage/v1/object/**",
+      },
+    ],
+  },
 };
 
 export default nextConfig;
