@@ -37,9 +37,10 @@ function ChatMessageComponent({ message }: ChatMessageProps) {
           )}
         </p>
 
-        {!isUser && !message.isStreaming && message.sources && (
-          <ChatSources sources={message.sources} />
-        )}
+        {/* Las fuentes llegan antes que el texto (evento "sources" precede a
+            los deltas): se pintan en cuanto existen, sin esperar a que
+            termine el streaming. */}
+        {!isUser && message.sources && <ChatSources sources={message.sources} />}
       </div>
     </div>
   )

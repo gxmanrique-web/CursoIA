@@ -38,19 +38,33 @@ function withStats(row: ArticleRowWithCounts): ArticleWithStats {
 }
 
 /**
- * Dispara la indexación automática en la base vectorial (Prompt 5).
- * Deliberadamente "fire-and-forget": generar el embedding implica llamar a
- * OpenAI y no debe bloquear ni poder hacer fallar la creación/actualización
- * del artículo, que ya se completó correctamente en Supabase en este punto.
- * Reutiliza embedding.service.ts a través del Route Handler server-side
- * (necesario porque ese servicio requiere secretos que no pueden vivir en
- * el navegador). Un fallo aquí solo se registra en consola; el artículo
- * queda publicado igualmente y su embedding puede regenerarse más tarde.
+ * Dispara la indexación automática en la base vectorial. Se invoca al
+ * publicar y al editar un artículo: editar el título o el resumen invalida
+ * los embeddings anteriores, porque forman parte del texto vectorizado
+ * (embedding.service antepone título+resumen a cada fragmento).
+ *
+ * NO DEBE LANZAR NUNCA: es un efecto secundario de publicar, su fallo jamás
+ * puede tumbar esa operación, que ya se completó correctamente en Supabase
+ * en este punto. Por eso no se propaga el error, solo se informa el
+ * resultado como boolean para que quien llama pueda avisar sin bloquear —
+ * y deliberadamente no se espera (`await`) en el flujo de publicación.
+ *
+ * `keepalive: true` es obligatorio: tras publicar, la UI redirige al inicio
+ * de inmediato, y sin keepalive el navegador aborta esta petición a mitad
+ * de camino — el artículo quedaría publicado pero nunca indexado, sin
+ * ningún error visible en consola.
  */
-function triggerEmbeddingIndexing(articleId: string): void {
-  fetch(`/api/v1/articles/${articleId}/embedding`, { method: "POST" }).catch((error) => {
+async function triggerEmbeddingIndexing(articleId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/v1/articles/${articleId}/embedding`, {
+      method: "POST",
+      keepalive: true,
+    })
+    return response.ok
+  } catch (error) {
     console.error("[article.service] No se pudo disparar la indexación del artículo:", error)
-  })
+    return false
+  }
 }
 
 /**
@@ -109,7 +123,7 @@ async function _createArticle(input: CreateArticleInput): Promise<Article> {
     .single()
 
   if (error) throw error
-  triggerEmbeddingIndexing(data.id)
+  void triggerEmbeddingIndexing(data.id)
   return data
 }
 
@@ -123,17 +137,17 @@ async function _updateArticle(id: string, input: UpdateArticleInput): Promise<Ar
     .single()
 
   if (error) throw error
-  triggerEmbeddingIndexing(id)
+  void triggerEmbeddingIndexing(id)
   return data
 }
 
 /**
- * No dispara ninguna limpieza de embeddings: article_embeddings tiene
+ * No dispara ninguna limpieza de embeddings: article_chunks tiene
  * `article_id ... references articles(id) on delete cascade` (migración
- * create_article_embeddings, Prompt 3), así que Postgres borra el embedding
- * asociado automáticamente y de forma atómica junto con el artículo. No hay
- * forma de dejar un registro huérfano incluso si esta función falla a mitad
- * de camino o el artículo se borra por otra vía (SQL directo, etc.).
+ * create_article_chunks), así que Postgres borra los fragmentos asociados
+ * automáticamente y de forma atómica junto con el artículo. No hay forma de
+ * dejar un registro huérfano incluso si esta función falla a mitad de
+ * camino o el artículo se borra por otra vía (SQL directo, etc.).
  */
 async function _deleteArticle(id: string): Promise<void> {
   const supabase = createClient()

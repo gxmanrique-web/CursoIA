@@ -14,8 +14,10 @@
     "@readhub/database": "*",
     "@readhub/shared": "*",
     "@readhub/types": "*",
-    "@anthropic-ai/sdk": "^0.110.0",
-    "openai": "^6.46.0"
+    "@supabase/supabase-js": "^2.110.0",
+    "openai": "^6.46.0",
+    "unpdf": "^0.12.1",
+    "mammoth": "^1.8.0"
   },
   "devDependencies": {
     "typescript": "^5",

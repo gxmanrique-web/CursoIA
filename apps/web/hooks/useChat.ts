@@ -1,9 +1,11 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 
 export interface ChatSource {
   rank: number
+  citationNumber: number
+  chunkId: string
   articleId: string
   title: string
   similarity: number
@@ -17,70 +19,32 @@ export interface ChatMessage {
   isStreaming?: boolean
 }
 
-const REVEAL_INTERVAL_MS = 40
-const REVEAL_CHUNK_SIZE = 10
+interface AssistantMetadata {
+  llmInvoked: boolean
+  documentsUsed: number
+  totalTokens: number | null
+}
+
+type StreamEvent =
+  | { type: "sources"; sources: ChatSource[] }
+  | { type: "delta"; content: string }
+  | { type: "done"; metadata: AssistantMetadata }
+  | { type: "error"; message: string }
 
 /**
- * Historial de conversación en memoria, vive mientras dure la sesión del
- * componente (se pierde al recargar). Se modela como una lista de mensajes
- * con id propio para poder evolucionar más adelante hacia un historial
- * persistido en Supabase sin cambiar la forma en que los componentes lo
- * consumen (Prompt 9, sección "Historial").
+ * Habla ÚNICAMENTE con /api/v1/chat: no conoce Supabase, ni Groq, ni Voyage.
+ * Lee la respuesta NDJSON del Route Handler (Prompt 7) fragmento a
+ * fragmento y actualiza el mensaje del asistente en tiempo real.
+ *
+ * Historial en memoria, vive mientras dure la sesión del componente (se
+ * pierde al recargar).
  */
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const lastQueryRef = useRef<string | null>(null)
-  const revealTimers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map())
-
-  useEffect(() => {
-    const timers = revealTimers.current
-    return () => {
-      timers.forEach((timer) => clearInterval(timer))
-      timers.clear()
-    }
-  }, [])
-
-  /**
-   * chat.service.ts (Prompt 8) devuelve la respuesta completa de una sola
-   * vez; no hay streaming real de Claude en esta fase, y modificar esa
-   * integración está fuera del alcance del Prompt 9 (restringido
-   * explícitamente a la capa de interfaz). Esto simula el renderizado
-   * progresivo revelando la respuesta ya recibida en el cliente, para
-   * cumplir el requisito de UX sin tocar Services ni la integración con IA.
-   */
-  const revealProgressively = useCallback((messageId: string, fullText: string) => {
-    if (fullText.length === 0) {
-      setMessages((prev) =>
-        prev.map((message) =>
-          message.id === messageId ? { ...message, isStreaming: false } : message
-        )
-      )
-      return
-    }
-
-    let shown = 0
-    const timer = setInterval(() => {
-      shown = Math.min(fullText.length, shown + REVEAL_CHUNK_SIZE)
-      const isDone = shown >= fullText.length
-
-      setMessages((prev) =>
-        prev.map((message) =>
-          message.id === messageId
-            ? { ...message, content: fullText.slice(0, shown), isStreaming: !isDone }
-            : message
-        )
-      )
-
-      if (isDone) {
-        clearInterval(timer)
-        revealTimers.current.delete(messageId)
-      }
-    }, REVEAL_INTERVAL_MS)
-
-    revealTimers.current.set(messageId, timer)
-  }, [])
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   const sendMessage = useCallback(
     async (query: string) => {
@@ -92,38 +56,110 @@ export function useChat() {
       setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "user", content: trimmed }])
       setIsLoading(true)
 
+      const assistantMessageId = crypto.randomUUID()
+      setMessages((prev) => [
+        ...prev,
+        { id: assistantMessageId, role: "assistant", content: "", isStreaming: true },
+      ])
+
+      const applyEvent = (event: StreamEvent) => {
+        switch (event.type) {
+          case "sources":
+            setMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantMessageId ? { ...message, sources: event.sources } : message
+              )
+            )
+            break
+          case "delta":
+            setMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantMessageId
+                  ? { ...message, content: message.content + event.content }
+                  : message
+              )
+            )
+            break
+          case "done":
+            setMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantMessageId ? { ...message, isStreaming: false } : message
+              )
+            )
+            break
+          case "error":
+            throw new Error(event.message)
+        }
+      }
+
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+
       try {
         const response = await fetch("/api/v1/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: trimmed }),
+          signal: controller.signal,
         })
 
-        const data = await response.json()
         if (!response.ok) {
+          const data = await response.json().catch(() => null)
           throw new Error(data?.error ?? "No se pudo generar una respuesta.")
         }
+        if (!response.body) {
+          throw new Error("La respuesta no incluyó contenido.")
+        }
 
-        const assistantMessageId = crypto.randomUUID()
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: assistantMessageId,
-            role: "assistant",
-            content: "",
-            sources: data.sources,
-            isStreaming: true,
-          },
-        ])
-        revealProgressively(assistantMessageId, data.answer as string)
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ""
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+
+          // Un fragmento de red puede cortar una línea NDJSON por la mitad:
+          // solo se procesan las líneas completas, la última (posiblemente
+          // incompleta) se conserva en el búfer para la siguiente vuelta.
+          const lines = buffer.split("\n")
+          buffer = lines.pop() ?? ""
+
+          for (const line of lines) {
+            if (!line.trim()) continue
+            applyEvent(JSON.parse(line) as StreamEvent)
+          }
+        }
+
+        if (buffer.trim()) {
+          applyEvent(JSON.parse(buffer) as StreamEvent)
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "No se pudo generar una respuesta.")
+        if (err instanceof DOMException && err.name === "AbortError") {
+          // Cancelación intencional del usuario (stopGeneration): no es un
+          // error que deba mostrarse.
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantMessageId ? { ...message, isStreaming: false } : message
+            )
+          )
+        } else {
+          setError(err instanceof Error ? err.message : "No se pudo generar una respuesta.")
+          setMessages((prev) => prev.filter((message) => message.id !== assistantMessageId))
+        }
       } finally {
         setIsLoading(false)
+        abortControllerRef.current = null
       }
     },
-    [isLoading, revealProgressively]
+    [isLoading]
   )
+
+  const stopGeneration = useCallback(() => {
+    abortControllerRef.current?.abort()
+  }, [])
 
   const retryLastMessage = useCallback(() => {
     if (lastQueryRef.current) {
@@ -131,5 +167,20 @@ export function useChat() {
     }
   }, [sendMessage])
 
-  return { messages, isLoading, error, sendMessage, retryLastMessage }
+  const newConversation = useCallback(() => {
+    abortControllerRef.current?.abort()
+    lastQueryRef.current = null
+    setMessages([])
+    setError(null)
+  }, [])
+
+  return {
+    messages,
+    isLoading,
+    error,
+    sendMessage,
+    retryLastMessage,
+    stopGeneration,
+    newConversation,
+  }
 }

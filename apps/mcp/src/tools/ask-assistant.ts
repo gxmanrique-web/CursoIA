@@ -17,9 +17,9 @@ export function registerAskAssistantTool(server: McpServer): void {
       title: "Ask ReadHub Assistant",
       description:
         "Responde una consulta en lenguaje natural usando únicamente el conocimiento " +
-        "publicado en ReadHub (RAG: búsqueda semántica + Claude), citando las fuentes " +
-        "usadas. Si no hay información suficiente en la plataforma, lo indica en vez de " +
-        "inventar una respuesta.",
+        "publicado en ReadHub (RAG: búsqueda semántica con Voyage AI + generación con " +
+        "Groq), citando las fuentes usadas. Si no hay información suficiente en la " +
+        "plataforma, lo indica en vez de inventar una respuesta.",
       inputSchema: {
         query: z.string().min(1).describe("Consulta en lenguaje natural."),
       },
@@ -27,9 +27,9 @@ export function registerAskAssistantTool(server: McpServer): void {
         answer: z.string(),
         sources: z.array(sourceShape),
         metadata: z.object({
-          model: z.string(),
-          documentsRetrieved: z.number(),
+          llmInvoked: z.boolean(),
           documentsUsed: z.number(),
+          totalTokens: z.number().nullable(),
         }),
       },
       annotations: {
@@ -46,9 +46,9 @@ export function registerAskAssistantTool(server: McpServer): void {
           answer: result.answer,
           sources: result.sources,
           metadata: {
-            model: result.metadata.model,
-            documentsRetrieved: result.metadata.documentsRetrieved,
+            llmInvoked: result.metadata.llmInvoked,
             documentsUsed: result.metadata.documentsUsed,
+            totalTokens: result.metadata.totalTokens,
           },
         },
       }

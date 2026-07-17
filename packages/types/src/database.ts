@@ -221,39 +221,36 @@ export interface Database {
           },
         ]
       }
-      article_embeddings: {
+      article_chunks: {
         Row: {
           id: string
           article_id: string
-          content_hash: string
+          chunk_index: number
+          content: string
           embedding: string
-          embedding_model: string
           created_at: string
-          updated_at: string
         }
         Insert: {
           id?: string
           article_id: string
-          content_hash: string
-          embedding: number[] | string
-          embedding_model?: string
+          chunk_index: number
+          content: string
+          embedding: string
           created_at?: string
-          updated_at?: string
         }
         Update: {
           id?: string
           article_id?: string
-          content_hash?: string
-          embedding?: number[] | string
-          embedding_model?: string
+          chunk_index?: number
+          content?: string
+          embedding?: string
           created_at?: string
-          updated_at?: string
         }
         Relationships: [
           {
-            foreignKeyName: "article_embeddings_article_id_fkey"
+            foreignKeyName: "article_chunks_article_id_fkey"
             columns: ["article_id"]
-            isOneToOne: true
+            isOneToOne: false
             referencedRelation: "articles"
             referencedColumns: ["id"]
           },
@@ -266,17 +263,19 @@ export interface Database {
         Args: Record<PropertyKey, never>
         Returns: boolean
       }
-      match_article_embeddings: {
+      match_article_chunks: {
         Args: {
-          query_embedding: number[] | string
-          match_threshold?: number
-          match_count?: number
+          query_embedding: string
+          match_threshold: number
+          match_count: number
         }
         Returns: {
+          chunk_id: string
           article_id: string
+          chunk_index: number
+          content: string
           title: string
           summary: string | null
-          document_path: string
           similarity: number
         }[]
       }

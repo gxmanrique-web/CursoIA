@@ -5,8 +5,8 @@ import { buildResearchContext } from "../readhub.js"
 import { sourceShape } from "./shared/rag-shapes.js"
 
 /**
- * Construye el contexto documental (fuentes recuperadas + prompt ya
- * ensamblado) para una consulta de investigación, sin invocar a Claude —
+ * Construye el contexto documental (fuentes recuperadas + prompts ya
+ * ensamblados) para una consulta de investigación, sin invocar a Groq —
  * mismo pipeline que usa `ask_assistant` internamente, expuesto para que un
  * cliente MCP con su propio LLM pueda reutilizar la recuperación y
  * construcción de contexto de ReadHub en vez de reimplementarla.
@@ -43,7 +43,8 @@ export function registerBuildResearchContextTool(server: McpServer): void {
           .describe("Máximo de documentos que entran al contexto final (por defecto 4)."),
       },
       outputSchema: {
-        prompt: z.string(),
+        systemPrompt: z.string(),
+        userPrompt: z.string(),
         sources: z.array(sourceShape),
         documentsRetrieved: z.number(),
         documentsUsed: z.number(),
@@ -61,7 +62,7 @@ export function registerBuildResearchContextTool(server: McpServer): void {
       })
 
       return {
-        content: [{ type: "text", text: result.prompt }],
+        content: [{ type: "text", text: result.userPrompt }],
         structuredContent: { ...result },
       }
     }

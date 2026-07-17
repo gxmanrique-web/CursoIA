@@ -1,74 +1,86 @@
-import { createAdminClient } from "@readhub/database"
+import type { SupabaseClient } from "@supabase/supabase-js"
+
+import type { Database } from "@readhub/types"
 import { withObservability } from "@readhub/shared/observability"
-import { generateEmbedding } from "./embedding.service"
+
+import { generateEmbeddings, toPgVectorLiteral } from "./providers/voyage"
 
 const SERVICE = "vector-search.service"
 
-// Top-K por defecto: 5 da suficiente diversidad de fuentes para fundamentar
-// una respuesta sin sobrecargar el prompt del LLM con documentos marginales;
-// el Context Builder (Prompt 7) podrá recortar aún más si hace falta.
+// Único origen del umbral de similitud: context-builder.service lo importa
+// de aquí en vez de redefinirlo. La función SQL match_article_chunks no trae
+// un valor por defecto propio (lo recibe como parámetro) precisamente para
+// no crear un segundo origen dentro de la base de datos.
+export const DEFAULT_SIMILARITY_THRESHOLD = 0.5
 const DEFAULT_MATCH_COUNT = 5
 
-// Umbral de similitud coseno por defecto (rango 0-1 tras 1 - distancia).
-// 0.5 es un punto medio deliberado: suficientemente bajo para no descartar
-// artículos relevantes ante consultas parafraseadas (pares realmente
-// relacionados con text-embedding-3-small suelen rondar 0.4-0.7), y
-// suficientemente alto para filtrar contenido claramente no relacionado
-// (que típicamente cae por debajo de 0.3).
-const DEFAULT_MATCH_THRESHOLD = 0.5
-
 export interface SemanticSearchOptions {
-  matchCount?: number
   matchThreshold?: number
+  matchCount?: number
 }
 
 export interface SemanticSearchResult {
   rank: number
+  chunkId: string
   articleId: string
+  chunkIndex: number
+  content: string
   title: string
   summary: string | null
-  documentPath: string
+  similarity: number
+}
+
+interface MatchArticleChunksRow {
+  chunk_id: string
+  article_id: string
+  chunk_index: number
+  content: string
+  title: string
+  summary: string | null
   similarity: number
 }
 
 /**
- * Busca los artículos más relevantes para una consulta en lenguaje natural.
- * Flujo: consulta -> embedding de consulta (embedding.service) -> similitud
- * vectorial (match_article_embeddings, Prompt 3, extendida en el Prompt 11
- * para devolver document_path directamente y evitar una segunda consulta a
- * articles) -> resultado estructurado listo para el Context Builder.
- *
- * Corre en el servidor: tanto generateEmbedding (OPENAI_API_KEY) como la
- * lectura de article_embeddings (sin políticas RLS para anon/authenticated,
- * ver Prompt 3) requieren el cliente admin con SUPABASE_SERVICE_ROLE_KEY.
+ * Invoca la función SQL de similitud y estructura el resultado. No construye
+ * contexto ni llama al LLM: eso es responsabilidad de context-builder.service
+ * y chat.service respectivamente. Tampoco reordena en cliente — la función
+ * SQL ya ordena usando el índice HNSW, reordenar aquí sería redundante y
+ * podría desalinearse silenciosamente de lo que el índice realmente eligió.
  */
-async function _searchArticles(
+async function _searchArticleChunks(
+  supabase: SupabaseClient<Database>,
   query: string,
   options: SemanticSearchOptions = {}
 ): Promise<SemanticSearchResult[]> {
+  const matchThreshold = options.matchThreshold ?? DEFAULT_SIMILARITY_THRESHOLD
   const matchCount = options.matchCount ?? DEFAULT_MATCH_COUNT
-  const matchThreshold = options.matchThreshold ?? DEFAULT_MATCH_THRESHOLD
 
-  const queryEmbedding = await generateEmbedding(query)
+  // input_type "query": Voyage proyecta consultas y documentos de forma
+  // distinta a como se indexaron los fragmentos.
+  const [queryEmbedding] = await generateEmbeddings([query], "query")
 
-  const supabase = createAdminClient()
-  const { data: matches, error } = await supabase.rpc("match_article_embeddings", {
-    query_embedding: queryEmbedding,
+  const { data, error } = await supabase.rpc("match_article_chunks", {
+    query_embedding: toPgVectorLiteral(queryEmbedding),
     match_threshold: matchThreshold,
     match_count: matchCount,
   })
 
   if (error) throw error
-  if (!matches) return []
 
-  return matches.map((match, index) => ({
+  return ((data ?? []) as MatchArticleChunksRow[]).map((row, index) => ({
     rank: index + 1,
-    articleId: match.article_id,
-    title: match.title,
-    summary: match.summary,
-    documentPath: match.document_path,
-    similarity: match.similarity,
+    chunkId: row.chunk_id,
+    articleId: row.article_id,
+    chunkIndex: row.chunk_index,
+    content: row.content,
+    title: row.title,
+    summary: row.summary,
+    similarity: row.similarity,
   }))
 }
 
-export const searchArticles = withObservability(SERVICE, "searchArticles", _searchArticles)
+export const searchArticleChunks = withObservability(
+  SERVICE,
+  "searchArticleChunks",
+  _searchArticleChunks
+)

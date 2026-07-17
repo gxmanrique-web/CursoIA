@@ -1,7 +1,7 @@
-import { getArticleById } from "@readhub/database"
+import { getArticleById, createAdminClient, ARTICLE_DOCUMENTS_BUCKET } from "@readhub/database"
 import { withObservability } from "@readhub/shared/observability"
 
-import { getArticleDocumentText } from "./embedding.service"
+import { extractDocumentText } from "./document-extraction.service"
 
 const SERVICE = "article-content.service"
 const MAX_CONTENT_CHARS = 8000
@@ -14,10 +14,27 @@ export interface ArticleContent {
 }
 
 /**
+ * Descarga y extrae el texto plano del documento fuente de un artículo
+ * (TXT/PDF/DOCX, ver document-extraction.service), null si Storage no tiene
+ * el objeto o el documento no tiene texto extraíble. No pasa por
+ * embedding.service porque este consumidor (MCP, sin sesión de usuario) no
+ * necesita client-por-parámetro: usa siempre el cliente admin, igual que ya
+ * hace getArticleById de @readhub/database.
+ */
+async function fetchArticleDocumentText(documentPath: string): Promise<string | null> {
+  const supabase = createAdminClient()
+  const { data, error } = await supabase.storage.from(ARTICLE_DOCUMENTS_BUCKET).download(documentPath)
+  if (error || !data) return null
+
+  return extractDocumentText(await data.arrayBuffer(), documentPath)
+}
+
+/**
  * Resuelve el contenido de un artículo (`getArticleById` +
- * `getArticleDocumentText`, mismo fallback documento-completo→resumen que
- * usa `context-builder.service` para el RAG) en un solo lugar del monorepo,
- * para que tanto los Prompts como las Tools de análisis del servidor MCP lo
+ * `fetchArticleDocumentText`, mismo fallback documento-completo→resumen que
+ * usaba `context-builder.service` para el RAG antes de que article_chunks
+ * guardara el texto directamente) en un solo lugar del monorepo, para que
+ * tanto los Prompts como las Tools de análisis del servidor MCP lo
  * reutilicen sin reimplementar esta resolución cada uno por su lado.
  */
 async function _resolveArticleContent(articleId: string): Promise<ArticleContent> {
@@ -26,7 +43,7 @@ async function _resolveArticleContent(articleId: string): Promise<ArticleContent
     throw new Error(`No existe ningún artículo con id "${articleId}".`)
   }
 
-  const documentText = await getArticleDocumentText(article.document_path)
+  const documentText = await fetchArticleDocumentText(article.document_path)
   const content = (documentText ?? article.summary ?? "").slice(0, MAX_CONTENT_CHARS)
 
   return {

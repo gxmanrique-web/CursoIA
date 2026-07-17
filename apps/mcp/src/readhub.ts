@@ -7,17 +7,20 @@
  * `from "@readhub/ai"` / `from "@readhub/database"` en cada archivo nuevo.
  *
  * - `@readhub/ai`: pipeline RAG completo (búsqueda semántica + asistente
- *   conversacional + indexación) — es el candidato más directo a Tools MCP.
- *   `getArticleDocumentText` (texto plano del documento fuente, solo para
- *   .txt) y `resolveArticleContent`/`formatArticleBlock`
- *   (`article-content.service`, que la usa internamente) los reutilizan los
- *   Prompts y las Tools de análisis del servidor MCP para trabajar sobre el
- *   contenido real de un artículo en vez de solo su resumen.
- *   `compareArticles`/`extractMainThemes`/`generateGlobalSummary`/
- *   `findRelatedArticles`/`buildResearchContext` (`analysis.service`) son
- *   las capacidades de análisis avanzado del Prompt 7, construidas sobre
- *   `generateCompletion` (Claude) y `searchArticles`/`buildContext` (RAG)
- *   ya existentes — ninguna reimplementa acceso a Supabase ni al LLM.
+ *   conversacional + indexación, sobre Voyage AI + Groq) — es el candidato
+ *   más directo a Tools MCP. Los services del pipeline reciben el cliente de
+ *   Supabase por parámetro (no lo crean ellos mismos); como el servidor MCP
+ *   no tiene sesión de usuario, este archivo los adapta con el cliente admin
+ *   (`createAdminClient`) para conservar la firma `(query, options)` que ya
+ *   consumían las Tools. `resolveArticleContent`/`formatArticleBlock`
+ *   (`article-content.service`) los reutilizan los Prompts y las Tools de
+ *   análisis para trabajar sobre el contenido real de un artículo (TXT/PDF/
+ *   DOCX) en vez de solo su resumen. `compareArticles`/`extractMainThemes`/
+ *   `generateGlobalSummary`/`findRelatedArticles`/`buildResearchContext`
+ *   (`analysis.service`) son las capacidades de análisis avanzado,
+ *   construidas sobre `generateCompletion` (Groq) y `searchArticleChunks`/
+ *   `buildContext` (RAG) ya existentes — ninguna reimplementa acceso a
+ *   Supabase ni al LLM.
  * - `@readhub/database`: cliente admin de Supabase (bypassa RLS), constantes
  *   de Storage, `getArticles`/`getArticleById`/`searchArticlesByKeyword`
  *   (equivalentes server-side de las consultas de lectura de
@@ -36,11 +39,25 @@
  * relevante, y ya viaja implícito dentro de los Services de `@readhub/ai`.
  */
 
+import {
+  searchArticleChunks,
+  askAssistant as askAssistantCore,
+  generateArticleEmbeddings as generateArticleEmbeddingsCore,
+  type SemanticSearchOptions,
+  type AskAssistantOptions,
+} from "@readhub/ai"
+import { createAdminClient } from "@readhub/database"
+
+export const searchArticlesSemantic = (query: string, options?: SemanticSearchOptions) =>
+  searchArticleChunks(createAdminClient(), query, options)
+
+export const askAssistant = (query: string, options?: AskAssistantOptions) =>
+  askAssistantCore(createAdminClient(), query, options)
+
+export const generateArticleEmbeddings = (articleId: string) =>
+  generateArticleEmbeddingsCore(createAdminClient(), articleId)
+
 export {
-  searchArticles as searchArticlesSemantic,
-  askAssistant,
-  generateArticleEmbedding,
-  getArticleDocumentText,
   resolveArticleContent,
   formatArticleBlock,
   compareArticles,
@@ -58,6 +75,8 @@ export type {
   GenerateGlobalSummaryResult,
   FindRelatedArticlesResult,
   BuildResearchContextResult,
+  SemanticSearchResult,
+  ContextSource,
 } from "@readhub/ai"
 
 export {

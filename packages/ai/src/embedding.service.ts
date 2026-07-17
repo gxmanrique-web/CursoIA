@@ -1,36 +1,23 @@
-import { createHash } from "node:crypto"
-import OpenAI from "openai"
+import type { SupabaseClient } from "@supabase/supabase-js"
 
-import { createAdminClient, ARTICLE_DOCUMENTS_BUCKET } from "@readhub/database"
+import type { Database } from "@readhub/types"
+import { ARTICLE_DOCUMENTS_BUCKET } from "@readhub/database"
 import { withObservability } from "@readhub/shared/observability"
+
+import { extractDocumentText } from "./document-extraction.service"
+import { generateEmbeddings, toPgVectorLiteral } from "./providers/voyage"
 
 const SERVICE = "embedding.service"
 
-// Debe coincidir exactamente con extensions.vector(1536) definido en la
-// migración create_article_embeddings (Prompt 3). Cambiar de modelo/proveedor
-// con otra dimensión requeriría además una migración de columna.
-const EMBEDDING_MODEL = "text-embedding-3-small"
-const EMBEDDING_DIMENSIONS = 1536
+// Tamaño objetivo de un fragmento: lo bastante grande para tener sentido por
+// sí solo, lo bastante pequeño para que la similitud no se diluya entre
+// varios temas dentro del mismo fragmento.
+const CHUNK_TARGET_CHARS = 1200
 
-// Presupuesto de caracteres para el contenido del documento: aproxima el
-// límite de contexto del modelo de embeddings (~8191 tokens) dejando margen
-// para título y resumen, sin necesitar un tokenizer real en esta fase.
-const MAX_CONTENT_CHARS = 20000
-
-let openaiClient: OpenAI | null = null
-
-function getOpenAIClient(): OpenAI {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      throw new Error(
-        "OPENAI_API_KEY no está configurada. embedding.service la requiere para generar embeddings."
-      )
-    }
-    openaiClient = new OpenAI({ apiKey })
-  }
-  return openaiClient
-}
+// Solape entre fragmentos consecutivos: sin él, una idea que cae justo en la
+// frontera queda partida en dos y deja de ser recuperable desde ninguno de
+// los dos lados.
+const CHUNK_OVERLAP_CHARS = 150
 
 interface ArticleRecord {
   id: string
@@ -39,27 +26,10 @@ interface ArticleRecord {
   document_path: string
 }
 
-export interface ArticleEmbeddingResult {
+async function fetchArticle(
+  supabase: SupabaseClient<Database>,
   articleId: string
-  embeddingModel: string
-  dimensions: number
-  contentHash: string
-}
-
-/**
- * Solo se extrae contenido real del documento fuente cuando es .txt.
- * PDF/DOCX se almacenan como binarios en Storage y este proyecto todavía no
- * tiene una etapa de extracción de texto (fuera del alcance de esta fase).
- * Para esos formatos el embedding se genera únicamente con título + resumen,
- * lo que degrada la calidad de la búsqueda semántica para esos artículos
- * hasta que exista un extractor dedicado.
- */
-function isPlainTextDocument(documentPath: string): boolean {
-  return documentPath.toLowerCase().endsWith(".txt")
-}
-
-async function fetchArticle(articleId: string): Promise<ArticleRecord> {
-  const supabase = createAdminClient()
+): Promise<ArticleRecord> {
   const { data, error } = await supabase
     .from("articles")
     .select("id, title, summary, document_path")
@@ -71,122 +41,218 @@ async function fetchArticle(articleId: string): Promise<ArticleRecord> {
 }
 
 /**
- * Descarga y extrae el texto plano del documento fuente de un artículo
- * (null si el formato no es .txt, ver {@link isPlainTextDocument}).
- * Se exporta porque no es lógica exclusiva de embeddings: el Context
- * Builder (Prompt 7) también necesita leer el contenido completo del
- * artículo para construir el contexto del LLM, y debe reutilizar esta
- * misma extracción en vez de volver a implementarla.
+ * null si el objeto no existe en Storage: se trata como resultado, no como
+ * error de programación. Exportada porque indexing.service (Prompt 8)
+ * también necesita descargar el documento antes de delegar en este service
+ * para vectorizarlo, en vez de duplicar la llamada a Storage.
  */
-export async function getArticleDocumentText(documentPath: string): Promise<string | null> {
-  if (!isPlainTextDocument(documentPath)) return null
+export async function downloadDocumentBytes(
+  supabase: SupabaseClient<Database>,
+  documentPath: string
+): Promise<ArrayBuffer | null> {
+  const { data, error } = await supabase.storage.from(ARTICLE_DOCUMENTS_BUCKET).download(documentPath)
+  if (error || !data) return null
+  return data.arrayBuffer()
+}
 
-  const supabase = createAdminClient()
-  const { data, error } = await supabase.storage
-    .from(ARTICLE_DOCUMENTS_BUCKET)
-    .download(documentPath)
+function splitIntoParagraphs(text: string): string[] {
+  return text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+}
 
-  if (error) throw error
-  return await data.text()
+/** Divide un texto por tamaño con solape constante entre piezas consecutivas. */
+function splitBySize(text: string, targetChars: number, overlapChars: number): string[] {
+  const pieces: string[] = []
+  let start = 0
+
+  while (start < text.length) {
+    const end = Math.min(start + targetChars, text.length)
+    pieces.push(text.slice(start, end))
+    if (end >= text.length) break
+    start = end - overlapChars
+  }
+
+  return pieces
 }
 
 /**
- * Compone el texto que se vectoriza. El título va primero y explícitamente
- * etiquetado porque concentra la señal temática más fuerte y más curada; el
- * resumen (también curado, escrito por el autor) le sigue; el contenido
- * completo del documento va al final porque es la señal más extensa y la
- * que se trunca si excede MAX_CONTENT_CHARS. Etiquetar cada sección evita
- * ambigüedad cuando falta resumen o contenido (documento no-.txt).
+ * Fragmenta el texto respetando límites de párrafo cuando caben en el
+ * tamaño objetivo; solo parte por tamaño los párrafos que lo excedan, con
+ * el mismo solape. Al cerrar un fragmento por acumulación de párrafos, el
+ * siguiente arranca con la cola del anterior (~CHUNK_OVERLAP_CHARS) para
+ * que el solape también exista en esa frontera, no solo dentro de párrafos
+ * partidos por tamaño.
  */
-function buildEmbeddingSource(article: ArticleRecord, documentText: string | null): string {
-  const parts = [
-    `Título: ${article.title}`,
-    article.summary ? `Resumen: ${article.summary}` : null,
-    documentText ? `Contenido: ${documentText.slice(0, MAX_CONTENT_CHARS)}` : null,
-  ].filter((part): part is string => Boolean(part))
+function chunkText(text: string): string[] {
+  const paragraphs = splitIntoParagraphs(text)
+  const chunks: string[] = []
+  let current = ""
 
-  return parts.join("\n\n")
-}
+  const flush = () => {
+    const trimmed = current.trim()
+    if (trimmed.length > 0) chunks.push(trimmed)
+  }
 
-function hashContent(text: string): string {
-  return createHash("sha256").update(text).digest("hex")
+  for (const paragraph of paragraphs) {
+    if (paragraph.length > CHUNK_TARGET_CHARS) {
+      flush()
+      chunks.push(...splitBySize(paragraph, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS))
+      current = ""
+      continue
+    }
+
+    const candidate = current.length > 0 ? `${current}\n\n${paragraph}` : paragraph
+    if (candidate.length > CHUNK_TARGET_CHARS) {
+      flush()
+      const tail = current.slice(-CHUNK_OVERLAP_CHARS)
+      current = tail.length > 0 ? `${tail}\n\n${paragraph}` : paragraph
+    } else {
+      current = candidate
+    }
+  }
+  flush()
+
+  return chunks
 }
 
 /**
- * Genera el embedding de un texto arbitrario. Es la única función que habla
- * con el proveedor de embeddings; tanto _generateArticleEmbedding como el
- * futuro motor de búsqueda semántica (Prompt 6, que necesita vectorizar la
- * consulta del usuario) la reutilizan en vez de llamar a OpenAI por su cuenta.
+ * Título (y resumen, si existe) que se antepone a CADA fragmento antes de
+ * vectorizarlo. Un fragmento tomado del centro de un documento pierde el
+ * tema del que habla; anclarlo con esta cabecera hace que una consulta
+ * sobre el tema general del artículo también recupere fragmentos internos
+ * que nunca mencionan esa palabra.
  */
-async function _generateEmbedding(text: string): Promise<number[]> {
-  const client = getOpenAIClient()
-  const response = await client.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: text,
-  })
-
-  const embedding = response.data[0]?.embedding
-  if (!embedding) {
-    throw new Error("El proveedor de embeddings no devolvió ningún vector.")
-  }
-  if (embedding.length !== EMBEDDING_DIMENSIONS) {
-    throw new Error(
-      `Dimensión de embedding inesperada: se recibieron ${embedding.length}, se esperaban ${EMBEDDING_DIMENSIONS}.`
-    )
-  }
-
-  return embedding
+function buildChunkHeader(article: { title: string; summary: string | null }): string {
+  return article.summary ? `${article.title}\n${article.summary}` : article.title
 }
 
-async function persistEmbedding(
+/** Solo para el texto que se envía a vectorizar: el fragmento se almacena desnudo, sin esta cabecera. */
+function buildEmbeddingInput(header: string, chunkContent: string): string {
+  return `${header}\n\n${chunkContent}`
+}
+
+interface ChunkInsertRow {
+  article_id: string
+  chunk_index: number
+  content: string
+  embedding: string
+}
+
+/**
+ * Idempotente por diseño: borra todos los fragmentos existentes del
+ * artículo antes de insertar los nuevos, así que reindexar dos veces deja
+ * el mismo estado en vez de acumular duplicados.
+ */
+async function persistChunks(
+  supabase: SupabaseClient<Database>,
   articleId: string,
-  embedding: number[],
-  contentHash: string
+  contents: string[],
+  vectors: number[][]
 ): Promise<void> {
-  const supabase = createAdminClient()
-  const { error } = await supabase
-    .from("article_embeddings")
-    .upsert(
-      {
-        article_id: articleId,
-        embedding,
-        embedding_model: EMBEDDING_MODEL,
-        content_hash: contentHash,
-      },
-      { onConflict: "article_id" }
-    )
+  const { error: deleteError } = await supabase
+    .from("article_chunks")
+    .delete()
+    .eq("article_id", articleId)
+  if (deleteError) throw deleteError
 
-  if (error) throw error
+  if (contents.length === 0) return
+
+  const rows: ChunkInsertRow[] = contents.map((content, index) => ({
+    article_id: articleId,
+    chunk_index: index,
+    content,
+    embedding: toPgVectorLiteral(vectors[index]),
+  }))
+
+  const { error: insertError } = await supabase.from("article_chunks").insert(rows)
+  if (insertError) throw insertError
+}
+
+// "no-document": Storage no tiene el objeto (o dejó de existir). "no-text":
+// document-extraction.service ya colapsa "formato sin extractor" y "sin
+// texto aprovechable" (p. ej. un PDF escaneado) en el mismo null — a este
+// nivel no hay forma de distinguirlos, y separarlos artificialmente solo
+// simularía una precisión que no existe.
+export type EmbeddingSkipReason = "no-document" | "no-text"
+
+export interface ArticleEmbeddingResult {
+  articleId: string
+  indexed: boolean
+  chunksCreated: number
+  reason?: EmbeddingSkipReason
+}
+
+export interface EmbeddableArticle {
+  id: string
+  title: string
+  summary: string | null
 }
 
 /**
- * Genera (o regenera) el embedding vigente de un artículo y lo persiste en
- * article_embeddings, reemplazando el anterior si existía (upsert por
- * article_id, único por artículo). Ejecución manual en esta fase: la
- * llamará el pipeline de indexación automática del Prompt 5, reutilizando
- * esta misma función sin duplicar lógica.
+ * Fragmenta, vectoriza y persiste los embeddings de un artículo a partir de
+ * texto YA extraído. Punto de delegación que usa indexing.service (Prompt 8)
+ * tras obtener el documento y extraer su texto por su cuenta — este service
+ * no vuelve a tocar Storage ni el extractor para ese caso. `text: null` no
+ * es un error: es el resultado de un documento sin texto aprovechable.
  */
-async function _generateArticleEmbedding(articleId: string): Promise<ArticleEmbeddingResult> {
-  const article = await fetchArticle(articleId)
-  const documentText = await getArticleDocumentText(article.document_path)
-  const source = buildEmbeddingSource(article, documentText)
-  const contentHash = hashContent(source)
-
-  const embedding = await _generateEmbedding(source)
-  await persistEmbedding(articleId, embedding, contentHash)
-
-  return {
-    articleId,
-    embeddingModel: EMBEDDING_MODEL,
-    dimensions: embedding.length,
-    contentHash,
+async function _generateEmbeddingsFromText(
+  supabase: SupabaseClient<Database>,
+  article: EmbeddableArticle,
+  text: string | null
+): Promise<ArticleEmbeddingResult> {
+  if (!text) {
+    await persistChunks(supabase, article.id, [], [])
+    return { articleId: article.id, indexed: false, chunksCreated: 0, reason: "no-text" }
   }
+
+  const chunks = chunkText(text)
+  if (chunks.length === 0) {
+    await persistChunks(supabase, article.id, [], [])
+    return { articleId: article.id, indexed: false, chunksCreated: 0, reason: "no-text" }
+  }
+
+  const header = buildChunkHeader(article)
+  const embeddingInputs = chunks.map((chunk) => buildEmbeddingInput(header, chunk))
+  const vectors = await generateEmbeddings(embeddingInputs, "document")
+
+  await persistChunks(supabase, article.id, chunks, vectors)
+
+  return { articleId: article.id, indexed: true, chunksCreated: chunks.length }
 }
 
-export const generateArticleEmbedding = withObservability(
+export const generateEmbeddingsFromText = withObservability(
   SERVICE,
-  "generateArticleEmbedding",
-  _generateArticleEmbedding
+  "generateEmbeddingsFromText",
+  _generateEmbeddingsFromText
 )
 
-export const generateEmbedding = withObservability(SERVICE, "generateEmbedding", _generateEmbedding)
+/**
+ * Pipeline completo a partir de solo un id: obtiene el artículo, descarga y
+ * extrae su documento, y delega en generateEmbeddingsFromText. Para
+ * llamadores que no tienen ya el artículo resuelto (MCP, tests); el Route
+ * Handler de indexación (Prompt 8) sí lo tiene y usa indexing.service en su
+ * lugar para no repetir esa consulta.
+ */
+async function _generateArticleEmbeddings(
+  supabase: SupabaseClient<Database>,
+  articleId: string
+): Promise<ArticleEmbeddingResult> {
+  const article = await fetchArticle(supabase, articleId)
+
+  const bytes = await downloadDocumentBytes(supabase, article.document_path)
+  if (!bytes) {
+    await persistChunks(supabase, articleId, [], [])
+    return { articleId, indexed: false, chunksCreated: 0, reason: "no-document" }
+  }
+
+  const text = await extractDocumentText(bytes, article.document_path)
+  return _generateEmbeddingsFromText(supabase, article, text)
+}
+
+export const generateArticleEmbeddings = withObservability(
+  SERVICE,
+  "generateArticleEmbeddings",
+  _generateArticleEmbeddings
+)

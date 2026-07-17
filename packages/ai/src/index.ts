@@ -1,4 +1,7 @@
+export * from "./document-extraction.service"
+export * from "./prompts"
 export * from "./embedding.service"
+export * from "./indexing.service"
 export * from "./vector-search.service"
 export * from "./context-builder.service"
 export * from "./chat.service"

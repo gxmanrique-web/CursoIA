@@ -1,9 +1,9 @@
-import { getArticleById } from "@readhub/database"
+import { getArticleById, createAdminClient } from "@readhub/database"
 import { withObservability } from "@readhub/shared/observability"
 
 import { resolveArticleContent, formatArticleBlock } from "./article-content.service"
 import { generateCompletion } from "./chat.service"
-import { searchArticles, type SemanticSearchOptions, type SemanticSearchResult } from "./vector-search.service"
+import { searchArticleChunks, type SemanticSearchOptions, type SemanticSearchResult } from "./vector-search.service"
 import { buildContext, type ContextBuilderOptions, type ContextSource } from "./context-builder.service"
 
 const SERVICE = "analysis.service"
@@ -135,8 +135,9 @@ async function _findRelatedArticles(
 
   const query = [article.title, article.summary].filter(Boolean).join("\n")
   const matchCount = (options.matchCount ?? 5) + 1
-  const results = await searchArticles(query, { ...options, matchCount })
-  const related = results.filter((result) => result.articleId !== articleId)
+  const supabase = createAdminClient()
+  const results = await searchArticleChunks(supabase, query, { ...options, matchCount })
+  const related = results.filter((result: SemanticSearchResult) => result.articleId !== articleId)
 
   return { articleId, articleTitle: article.title, related }
 }
@@ -147,14 +148,15 @@ export interface BuildResearchContextOptions {
 }
 
 export interface BuildResearchContextResult {
-  prompt: string
+  systemPrompt: string
+  userPrompt: string
   sources: ContextSource[]
   documentsRetrieved: number
   documentsUsed: number
 }
 
 /**
- * Construye (sin invocar a Claude) el contexto documental para una consulta
+ * Construye (sin invocar a Groq) el contexto documental para una consulta
  * de investigación: mismo pipeline recuperación + construcción de prompt
  * que usa internamente `askAssistant`, pero expuesto sin la llamada al LLM,
  * para que un cliente MCP externo pueda inspeccionar las fuentes o usarlas
@@ -164,14 +166,16 @@ async function _buildResearchContext(
   query: string,
   options: BuildResearchContextOptions = {}
 ): Promise<BuildResearchContextResult> {
-  const searchResults = await searchArticles(query, options.search)
-  const context = await buildContext({ query, documents: searchResults }, options.context)
+  const supabase = createAdminClient()
+  const searchResults = await searchArticleChunks(supabase, query, options.search)
+  const context = buildContext(query, searchResults, options.context)
 
   return {
-    prompt: context.prompt,
+    systemPrompt: context.systemPrompt,
+    userPrompt: context.userPrompt,
     sources: context.sources,
     documentsRetrieved: searchResults.length,
-    documentsUsed: context.documentsUsed,
+    documentsUsed: context.sources.length,
   }
 }
 
